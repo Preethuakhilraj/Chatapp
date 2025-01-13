@@ -8,12 +8,13 @@ const path = require("path");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
-
+const upload = multer({ dest: "uploads/" });
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
+app.use(router);
+const router = express.Router();
 // WebSocket setup
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -54,7 +55,36 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   },
 });
-const upload = multer({ storage });
+
+
+// Configure multer for file uploads
+
+
+// Update profile route
+router.put("/update-profile", upload.single("profileImage"), async (req, res) => {
+  const { username, status, mobileNumber } = req.body;
+  const userId = req.user._id; // Assume user ID is available via authentication middleware
+
+  try {
+    const updateData = { username, status, mobileNumber };
+    if (req.file) {
+      updateData.profileImage = req.file.path; // Save file path or handle upload to cloud storage
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
+      new: true,
+    });
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.status(200).json({ message: "Profile updated successfully", user: updatedUser });
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    res.status(500).json({ message: "Failed to update profile", error });
+  }
+});
 
 // WebSocket handling
 io.on("connection", (socket) => {
