@@ -42,7 +42,11 @@ const Message = mongoose.model("Message", messageSchema);
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  status: { type: String, default: "" }, // Optional field for user status
+  mobileNumber: { type: String, default: "" }, // Optional mobile number
+  profileImage: { type: String, default: "" }, // Optional profile image URL
 });
+
 const User = mongoose.model("User", userSchema);
 
 // Configure multer for file uploads
@@ -57,53 +61,59 @@ const storage = multer.diskStorage({
 });
 
 
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  console.log("Authorization Header:", authHeader);
-
-  const token = authHeader && authHeader.split(" ")[1];
+const authenticate = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1]; // Extract Bearer token
   if (!token) {
-    console.log("No token provided");
     return res.status(401).json({ message: "Token not provided" });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      console.log("Token verification failed:", err.message);
-      return res.status(403).json({ message: "Invalid token" });
-    }
-    console.log("Decoded user:", user);
-    req.user = user;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // Attach user info (like ID) to req
     next();
-  });
+  } catch (error) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
 };
 
 
+
 // Update profile route
-router.put("/update-profile", authenticateToken, upload.single("profileImage"), async (req, res) => {
+// Update profile route
+router.put("/update-profile", authenticate, upload.single("profileImage"), async (req, res) => {
   const { username, status, mobileNumber } = req.body;
-  const userId = req.user.id; // `req.user` will now have the decoded token payload
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: "User ID not provided. Authentication required." });
+  }
 
   try {
-    const updateData = { username, status, mobileNumber };
-    if (req.file) {
-      updateData.profileImage = req.file.path; // Save file path or handle upload to cloud storage
-    }
+    const updateData = {};
+    if (username) updateData.username = username;
+    if (status) updateData.status = status;
+    if (mobileNumber) updateData.mobileNumber = mobileNumber;
+    if (req.file) updateData.profileImage = req.file.path;
 
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
-      new: true,
-    });
+      new: true, // Return the updated document
+      runValidators: true, // Apply validations
+    }).select("-password"); // Exclude the password field
 
     if (!updatedUser) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    res.status(200).json({ message: "Profile updated successfully", user: updatedUser });
+    res.status(200).json({
+      message: "Profile updated successfully",
+      user: updatedUser,
+    });
   } catch (error) {
     console.error("Error updating profile:", error);
-    res.status(500).json({ message: "Failed to update profile", error });
+    res.status(500).json({ message: "Failed to update profile", error: error.message });
   }
 });
+
 
 
 // WebSocket handling
