@@ -13,8 +13,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-app.use(router);
 const router = express.Router();
+app.use(router);
 // WebSocket setup
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -57,13 +57,32 @@ const storage = multer.diskStorage({
 });
 
 
-// Configure multer for file uploads
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  console.log("Authorization Header:", authHeader);
+
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    console.log("No token provided");
+    return res.status(401).json({ message: "Token not provided" });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) {
+      console.log("Token verification failed:", err.message);
+      return res.status(403).json({ message: "Invalid token" });
+    }
+    console.log("Decoded user:", user);
+    req.user = user;
+    next();
+  });
+};
 
 
 // Update profile route
-router.put("/update-profile", upload.single("profileImage"), async (req, res) => {
+router.put("/update-profile", authenticateToken, upload.single("profileImage"), async (req, res) => {
   const { username, status, mobileNumber } = req.body;
-  const userId = req.user._id; // Assume user ID is available via authentication middleware
+  const userId = req.user.id; // `req.user` will now have the decoded token payload
 
   try {
     const updateData = { username, status, mobileNumber };
@@ -85,6 +104,7 @@ router.put("/update-profile", upload.single("profileImage"), async (req, res) =>
     res.status(500).json({ message: "Failed to update profile", error });
   }
 });
+
 
 // WebSocket handling
 io.on("connection", (socket) => {
