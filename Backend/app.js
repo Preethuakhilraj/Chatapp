@@ -8,14 +8,14 @@ const path = require("path");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
-const upload = multer({ dest: "uploads/" });
+
 const app = express();
+const router = express.Router();
 app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-const router = express.Router();
 app.use(router);
+
 // WebSocket setup
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -28,165 +28,68 @@ mongoose
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("Error connecting to MongoDB:", err));
 
+// User schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  status: { type: String, default: "offline" },
+  mobileNumber: { type: String, default: "" },
+  profileImage: { type: String, default: "" },
+});
+
+const User = mongoose.model("User", userSchema);
+
 // Message schema
 const messageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
-  receiver: { type: String }, // Optional, for private messages
+  receiver: { type: String },
   content: String,
   timestamp: { type: Date, default: Date.now },
   isDelivered: { type: Boolean, default: false },
   isRead: { type: Boolean, default: false },
 });
+
 const Message = mongoose.model("Message", messageSchema);
 
-// User schema
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  status: { type: String, default: "" }, // Optional field for user status
-  mobileNumber: { type: String, default: "" }, // Optional mobile number
-  profileImage: { type: String, default: "" }, // Optional profile image URL
-});
-
-const User = mongoose.model("User", userSchema);
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  },
-});
-
-
+// Middleware for authentication
 const authenticate = (req, res, next) => {
-  const token = req.headers.authorization?.split(" ")[1]; // Extract Bearer token
-  if (!token) {
-    return res.status(401).json({ message: "Token not provided" });
-  }
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ message: "Token not provided" });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // Attach user info (like ID) to req
+    req.user = decoded;
     next();
   } catch (error) {
-    return res.status(401).json({ message: "Invalid or expired token" });
+    res.status(401).json({ message: "Invalid or expired token" });
   }
 };
 
-
-
-// Update profile route
-// Update profile route
-router.put("/update-profile", authenticate, upload.single("profileImage"), async (req, res) => {
-  const { username, status, mobileNumber } = req.body;
-  const userId = req.user?.id;
-
-  if (!userId) {
-    return res.status(401).json({ message: "User ID not provided. Authentication required." });
-  }
-
-  try {
-    const updateData = {};
-    if (username) updateData.username = username;
-    if (status) updateData.status = status;
-    if (mobileNumber) updateData.mobileNumber = mobileNumber;
-    if (req.file) updateData.profileImage = req.file.path;
-
-    const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
-      new: true, // Return the updated document
-      runValidators: true, // Apply validations
-    }).select("-password"); // Exclude the password field
-
-    if (!updatedUser) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    res.status(200).json({
-      message: "Profile updated successfully",
-      user: updatedUser,
-    });
-  } catch (error) {
-    console.error("Error updating profile:", error);
-    res.status(500).json({ message: "Failed to update profile", error: error.message });
-  }
-});
-
-
-
 // WebSocket handling
+const onlineUsers = new Map();
+
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  socket.on("setUsername", (username) => {
-    socket.username = username;
+  socket.on("setUsername", async (username) => {
+    onlineUsers.set(socket.id, username);
+    await User.findOneAndUpdate({ username }, { status: "online" });
+    io.emit("onlineUsers", Array.from(onlineUsers.values()));
     console.log(`Socket ${socket.id} set as ${username}`);
   });
 
-  socket.on("sendMessage", async (message) => {
-    try {
-      if (!message.sender || !message.content) {
-        throw new Error("Invalid message payload");
-      }
-
-      const savedMessage = await Message.create({
-        sender: message.sender,
-        receiver: message.receiver || null,
-        content: message.content,
-        timestamp: new Date(),
-        isDelivered: true,
-      });
-
-      const formattedMessage = {
-        _id: savedMessage._id.toString(),
-        sender: savedMessage.sender,
-        receiver: savedMessage.receiver,
-        content: savedMessage.content,
-        timestamp: savedMessage.timestamp,
-        isDelivered: savedMessage.isDelivered,
-        isRead: savedMessage.isRead,
-      };
-
-      if (message.receiver) {
-        const receiverSocket = Array.from(io.sockets.sockets.values()).find(
-          (s) => s.username === message.receiver
-        );
-        if (receiverSocket) {
-          receiverSocket.emit("receiveMessage", formattedMessage);
-        }
-      } else {
-        io.emit("receiveMessage", formattedMessage);
-      }
-    } catch (err) {
-      console.error("Error saving message:", err);
+  socket.on("disconnect", async () => {
+    const username = onlineUsers.get(socket.id);
+    if (username) {
+      await User.findOneAndUpdate({ username }, { status: "offline" });
+      onlineUsers.delete(socket.id);
+      io.emit("onlineUsers", Array.from(onlineUsers.values()));
     }
-  });
-
-  socket.on("markAsRead", async (messageId) => {
-    try {
-      const message = await Message.findById(messageId);
-      if (message) {
-        message.isRead = true;
-        await message.save();
-        io.emit("updateMessageStatus", {
-          _id: message._id,
-          isRead: message.isRead,
-        });
-      }
-    } catch (err) {
-      console.error("Error marking message as read:", err);
-    }
-  });
-
-  socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
 });
 
-// API Routes
+// Messages route
 app.get("/messages", async (req, res) => {
   try {
     const { sender, receiver } = req.query;
@@ -221,27 +124,66 @@ app.post("/messages", async (req, res) => {
   }
 });
 
+// File upload setup
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname)); // Generate unique filenames
+  },
+});
+
+const upload = multer({ storage });
+
 // Upload a file
 app.post("/upload", upload.single("file"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "File upload failed" });
   }
 
-  const fileType = req.file.mimetype.split("/")[0];
   const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  res.json({ url: fileUrl, type: req.file.mimetype.split("/")[0] });
+});
 
-  res.json({ url: fileUrl, type: fileType });
+// Fetch all online users
+router.get("/online-users", (req, res) => {
+  res.json(Array.from(onlineUsers.values()));
+});
+
+// Update profile route
+router.put("/update-profile", authenticate, upload.single("profileImage"), async (req, res) => {
+  const { username, status, mobileNumber } = req.body;
+  const userId = req.user?.id;
+
+  try {
+    const updateData = {
+      ...(username && { username }),
+      ...(status && { status }),
+      ...(mobileNumber && { mobileNumber }),
+      ...(req.file && { profileImage: req.file.path }),
+    };
+
+    const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
+      new: true,
+      runValidators: true,
+    }).select("-password");
+
+    if (!updatedUser) return res.status(404).json({ message: "User not found" });
+
+    res.status(200).json({ message: "Profile updated successfully", user: updatedUser });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update profile", error: error.message });
+  }
 });
 
 // Signup route
-app.post("/signup", async (req, res) => {
+router.post("/signup", async (req, res) => {
   const { username, password } = req.body;
 
   try {
     const existingUser = await User.findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ message: "Username already taken." });
-    }
+    if (existingUser) return res.status(400).json({ message: "Username already taken." });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = new User({ username, password: hashedPassword });
@@ -249,51 +191,52 @@ app.post("/signup", async (req, res) => {
 
     res.status(201).json({ message: "Signup successful!" });
   } catch (error) {
-    console.error("Error during signup:", error);
-    res.status(500).json({ message: "An error occurred. Please try again." });
+    res.status(500).json({ message: "Signup failed", error: error.message });
   }
 });
 
 // Login route
-app.post("/login", async (req, res) => {
+router.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
   try {
     const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    if (!user) return res.status(404).json({ message: "User not found." });
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: "Invalid credentials." });
-    }
+    if (!isPasswordValid) return res.status(401).json({ message: "Invalid credentials." });
 
     const token = jwt.sign({ id: user._id, username: user.username }, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
 
-    res.status(200).json({
-      message: "Login successful!",
-      username: user.username,
-      token,
-    });
+    res.status(200).json({ message: "Login successful!", token });
   } catch (error) {
-    console.error("Error during login:", error);
-    res.status(500).json({ message: "An error occurred. Please try again." });
+    res.status(500).json({ message: "Login failed", error: error.message });
   }
 });
 
 // Fetch all users
-app.get("/users", async (req, res) => {
+router.get("/users", async (req, res) => {
   try {
     const users = await User.find();
-    res.status(200).json(users);
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching users", error: err.message });
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch users", error: error.message });
   }
 });
 
-// Start the server
+// Catch-all for undefined routes
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found" });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: "Internal server error", error: err.message });
+});
+
+// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
